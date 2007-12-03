@@ -2,19 +2,19 @@
 # free software; you can redistribute it and/or modify it under the same
 # terms as Perl itself.
 # 
-# $Id: Simple.pm,v 1.2 2007/11/28 15:08:56 gavin Exp $
+# $Id: Simple.pm,v 1.3 2007/12/03 11:47:23 gavin Exp $
 package Net::EPP::Simple;
 use Digest::SHA1 qw(sha1_hex);
-use Net::EPP::Frame;
+use Net::EPP::Frame 0.11;
 use Time::HiRes qw(time);
 use base qw(Net::EPP::Client);
 use constant EPP_XMLNS	=> 'urn:ietf:params:xml:ns:epp-1.0';
 use vars qw($VERSION $Error $Code);
 use strict;
 
-our $VERSION = '0.01';
-our $Error = '';
-our $Code = 1000;
+our $VERSION	= '0.02';
+our $Error	= '';
+our $Code	= 1000;
 
 =pod
 
@@ -47,7 +47,7 @@ Net::EPP::Simple - a simple EPP client interface for the most common jobs
 
 =head1 DESCRIPTION
 
-EPP is the Extensible Provisioning Protocol. EPP (defined in RFC 3730) is an
+EPP is the Extensible Provisioning Protocol. EPP (defined in RFC 4930) is an
 application layer client-server protocol for the provisioning and management of
 objects stored in a shared central repository. Specified in XML, the protocol
 defines generic object management operations and an extensible framework that
@@ -104,8 +104,6 @@ sub new {
 	$login->clID->appendText($params{user});
 	$login->pw->appendText($params{pass});
 
-	$login->clTRID->appendText(sha1_hex(ref($self).time().$$));
-
 	my $objects = $self->{greeting}->getElementsByTagNameNS(EPP_XMLNS, 'objURI');
 	while (my $object = $objects->shift) {
 		my $el = $login->createElement('objURI');
@@ -133,7 +131,7 @@ sub new {
 
 =pod
 
-=head1 Availability Checks
+=head1 AVAILABILITY CHECKS
 
 You can do a simple C<E<lt>checkE<gt>> request for an object like so:
 
@@ -218,9 +216,10 @@ You can retrieve information about an object by using one of the following:
 	my $info = $epp->contact_info($contact);
 
 C<Net::EPP::Simple> will construct an C<E<lt>infoE<gt>> frame and send
-it to the server, then parse the response into a simple hash. The layout
-of the hash depends on the object in question. If there is an error, these
-methods will return C<undef>, and you can then check C<$Net::EPP::Simple::Error> and C<$Net::EPP::Simple::Code>.
+it to the server, then parse the response into a simple hash ref. The
+layout of the hash ref depends on the object in question. If there is an
+error, these methods will return C<undef>, and you can then check
+C<$Net::EPP::Simple::Error> and C<$Net::EPP::Simple::Code>.
 
 =cut
 
@@ -306,7 +305,8 @@ sub _get_common_properties_from_infData {
 
 =head2 DOMAIN INFORMATION
 
-The hash returned by C<domain_info()> will usually look something like this:
+The hash ref returned by C<domain_info()> will usually look something
+like this:
 
 	$info = {
 	  'contacts' => {
@@ -336,10 +336,10 @@ The hash returned by C<domain_info()> will usually look something like this:
 	  ],
 	};
 
-Members of the C<contacts> hash may be strings or, if there are multiple
-associations of the same type, an anonymous array of strings. If the#
-server uses the "hostAttr" model instead of "hostObj", then the C<ns>
-member will look like this:
+Members of the C<contacts> hash ref may be strings or, if there are
+multiple associations of the same type, an anonymous array of strings.
+If the server uses the "hostAttr" model instead of "hostObj", then the
+C<ns> member will look like this:
 
 	$info->{ns} = [
 	  {
@@ -426,7 +426,8 @@ sub _domain_infData_to_hash {
 
 =head2 HOST INFORMATION
 
-The hash returned by C<host_info()> will usually look something like this:
+The hash ref returned by C<host_info()> will usually look something like
+this:
 
 	$info = {
 	  'crDate' => '2007-09-17T15:38:56.0Z',
@@ -469,8 +470,8 @@ sub _host_infData_to_hash {
 
 =head2 CONTACT INFORMATION
 
-The hash returned by C<contact_info()> will usually look something like
-this:
+The hash ref returned by C<contact_info()> will usually look something
+like this:
 
 	$VAR1 = {
 	  'postalInfo' => {
@@ -557,7 +558,168 @@ sub _contact_infData_to_hash {
 	return $hash;
 }
 
-# override the parent method with a function that handles connection timeouts:
+=pod
+
+=head1 OBJECT TRANSFERS
+
+The EPP C<E<lt>transferE<gt>> command suppots five different operations:
+query, request, cancel, approve, and reject. C<Net::EPP::Simple> makes
+these available using the following methods:
+
+	# For domain objects:
+
+	$epp->domain_transfer_query($domain);
+	$epp->domain_transfer_cancel($domain);
+	$epp->domain_transfer_request($domain, $authInfo, $period);
+	$epp->domain_transfer_approve($domain);
+	$epp->domain_transfer_reject($domain);
+
+	# For contact objects:
+
+	$epp->contact_transfer_query($contact);
+	$epp->contact_transfer_cancel($contact);
+	$epp->contact_transfer_request($contact, $authInfo);
+	$epp->contact_transfer_approve($contact);
+	$epp->contact_transfer_reject($contact);
+
+Most of these methods will just set the value of C<$Net::EPP::Simple::Code>
+and return either true or false. However, the C<domain_transfer_request()>,
+C<domain_transfer_query()>, C<contact_transfer_request()> and C<contact_transfer_query()>
+methods will return a hash ref that looks like this:
+
+	my $trnData = {
+	  'name' => 'example.tld',
+	  'reID' => 'losing-registrar',
+	  'acDate' => '2007-12-04T12:24:53.0Z',
+	  'acID' => 'gaining-registrar',
+	  'reDate' => '2007-11-29T12:24:53.0Z',
+	  'trStatus' => 'pending'
+	};
+
+=cut
+
+sub _transfer_request {
+	my ($self, $op, $type, $identifier, $authInfo, $period) = @_;
+
+	my $class = sprintf('Net::EPP::Frame::Command::Transfer::%s', ucfirst(lc($type)));
+
+	my $frame;
+	eval("\$frame = $class->new");
+	if ($@ || ref($frame) ne $class) {
+		$Error = "Error building request frame: $@";
+		$Code = 2400;
+		return undef;
+
+	} else {
+		$frame->setOp($op);
+		if ($type eq 'domain') {
+			$frame->setDomain($identifier);
+
+		} elsif ($type eq 'contact') {
+			$frame->setContact($identifier);
+
+		}
+
+		if ($op eq 'request' || $op eq 'query') {
+			$frame->setAuthInfo($authInfo) if ($authInfo ne '');
+		}
+
+		$frame->setPeriod(int($period)) if ($op eq 'request');
+	}
+
+	my $response = $self->request($frame);
+
+	$Code = $self->_get_response_code($response);
+
+	if ($Code > 1999) {
+		$Error = $response->msg;
+		return undef;
+
+	} elsif ($op eq 'query' || $op eq 'request') {
+		my $trnData = $response->getElementsByLocalName('trnData')->shift;
+		my $hash = {};
+		foreach my $child ($trnData->childNodes) {
+			$hash->{$child->localName} = $child->textContent;
+		}
+
+		return $hash;
+
+	} else {
+		return 1;
+
+	}
+}
+
+sub domain_transfer_query {
+	return $_[0]->_transfer_request('query', 'domain', $_[1]);
+}
+
+sub domain_transfer_cancel {
+	return $_[0]->_transfer_request('cancel', 'domain', $_[1]);
+}
+
+sub domain_transfer_request {
+	return $_[0]->_transfer_request('request', 'domain', $_[1], $_[2], $_[3]);
+}
+
+sub domain_transfer_approve {
+	return $_[0]->_transfer_request('approve', 'domain', $_[1]);
+}
+
+sub domain_transfer_reject {
+	return $_[0]->_transfer_request('reject', 'domain', $_[1]);
+}
+
+sub contact_transfer_query {
+	return $_[0]->_transfer_request('query', 'contact', $_[1]);
+}
+
+sub contact_transfer_cancel {
+	return $_[0]->_transfer_request('cancel', 'contact', $_[1]);
+}
+
+sub contact_transfer_request {
+	return $_[0]->_transfer_request('request', 'contact', $_[1], $_[2]);
+}
+
+sub contact_transfer_approve {
+	return $_[0]->_transfer_request('approve', 'contact', $_[1]);
+}
+
+sub contact_transfer_reject {
+	return $_[0]->_transfer_request('reject', 'contact', $_[1]);
+}
+
+=pod
+
+=head1 OVERRIDDEN METHODS FROM C<Net::EPP::Client>
+
+C<Net::EPP::Simple> overrides some methods inherited from
+C<Net::EPP::Client>. These are described below:
+
+=head2 THE C<request()> METHOD
+
+C<Net::EPP::Simple> overrides this method so it can automatically populate
+the C<E<lt>clTRIDE<gt>> element with a unique string. It then passes the
+frame back up to C<Net::EPP::Client>.
+
+=cut
+
+sub request {
+	my ($self, $frame) = @_;
+	$frame->clTRID->appendText(sha1_hex(ref($self).time().$$)) if ($frame->isa('XML::LibXML::Node'));
+	return $self->SUPER::request($frame);
+}
+
+=pod
+
+=head2 THE C<get_frame()> METHOD
+
+C<Net::EPP::Simple> overrides this method so it can catch timeouts and
+network errors. If such an error occurs it will return C<undef>.
+
+=cut
+
 sub get_frame {
 	my $self = shift;
 	my $frame;
@@ -589,6 +751,8 @@ sub _get_response_code {
 	return 2400;
 }
 
+sub error { $Error }
+
 sub logout {
 	my $self = shift;
 	my $response = $self->request(Net::EPP::Frame::Command::Logout->new);
@@ -605,7 +769,7 @@ sub DESTROY {
 
 =head1 AUTHOR
 
-Gavin Brown for CentralNic Ltd (L<http://www.centralnic.com/>).
+CentralNic Ltd (L<http://www.centralnic.com/>).
 
 =head1 COPYRIGHT
 
@@ -622,7 +786,7 @@ redistribute it and/or modify it under the same terms as Perl itself.
 
 =item * L<Net::EPP::Proxy>
 
-=item * RFCs 3730 and RFC 3734, available from L<http://www.ietf.org/>.
+=item * RFCs 4930 and RFC 4934, available from L<http://www.ietf.org/>.
 
 =item * The CentralNic EPP site at L<http://www.centralnic.com/resellers/epp>.
 
