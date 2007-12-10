@@ -2,17 +2,18 @@
 # free software; you can redistribute it and/or modify it under the same
 # terms as Perl itself.
 # 
-# $Id: Simple.pm,v 1.3 2007/12/03 11:47:23 gavin Exp $
+# $Id: Simple.pm,v 1.5 2007/12/10 11:22:13 gavin Exp $
 package Net::EPP::Simple;
 use Digest::SHA1 qw(sha1_hex);
 use Net::EPP::Frame 0.11;
 use Time::HiRes qw(time);
+use UNIVERSAL qw(isa);
 use base qw(Net::EPP::Client);
 use constant EPP_XMLNS	=> 'urn:ietf:params:xml:ns:epp-1.0';
 use vars qw($VERSION $Error $Code);
 use strict;
 
-our $VERSION	= '0.02';
+our $VERSION	= '0.03';
 our $Error	= '';
 our $Code	= 1000;
 
@@ -707,7 +708,7 @@ frame back up to C<Net::EPP::Client>.
 
 sub request {
 	my ($self, $frame) = @_;
-	$frame->clTRID->appendText(sha1_hex(ref($self).time().$$)) if ($frame->isa('XML::LibXML::Node'));
+	$frame->clTRID->appendText(sha1_hex(ref($self).time().$$)) if (isa($frame, 'XML::LibXML::Node'));
 	return $self->SUPER::request($frame);
 }
 
