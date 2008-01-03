@@ -2,7 +2,7 @@
 # free software; you can redistribute it and/or modify it under the same
 # terms as Perl itself.
 # 
-# $Id: Simple.pm,v 1.5 2007/12/10 11:22:13 gavin Exp $
+# $Id: Simple.pm,v 1.8 2008/01/03 21:47:53 gavin Exp $
 package Net::EPP::Simple;
 use Digest::SHA1 qw(sha1_hex);
 use Net::EPP::Frame 0.11;
@@ -13,7 +13,7 @@ use constant EPP_XMLNS	=> 'urn:ietf:params:xml:ns:epp-1.0';
 use vars qw($VERSION $Error $Code);
 use strict;
 
-our $VERSION	= '0.03';
+our $VERSION	= '0.04';
 our $Error	= '';
 our $Code	= 1000;
 
@@ -199,7 +199,15 @@ sub _check {
 
 	} else {
 		my $xmlns = (Net::EPP::Frame::ObjectSpec->spec($type))[1];
-		return $response->getNode($xmlns, 'name')->getAttribute('avail');
+		my $key;
+		if ($type eq 'domain' || $type eq 'host') {
+			$key = 'name';
+
+		} elsif ($type eq 'contact') {
+			$key = 'id';
+
+		}
+		return $response->getNode($xmlns, $key)->getAttribute('avail');
 
 	}
 }
@@ -367,7 +375,7 @@ the C<type> attribute is optional.
 sub _domain_infData_to_hash {
 	my ($self, $infData) = @_;
 
-	my $hash = $self->_get_common_properties_from_infData($infData, 'registrant', 'name');
+	my $hash = $self->_get_common_properties_from_infData($infData, 'registrant', 'name', 'exDate');
 
 	my $contacts = $infData->getElementsByLocalName('contact');
 	while (my $contact = $contacts->shift) {
@@ -475,6 +483,7 @@ The hash ref returned by C<contact_info()> will usually look something
 like this:
 
 	$VAR1 = {
+	  'id' => 'contact-id',
 	  'postalInfo' => {
 	    'int' => {
 	      'name' => 'John Doe',
@@ -491,7 +500,7 @@ like this:
 	      }
 	    }
 	  },
-	  'clID' => 'H292913',
+	  'clID' => 'registrar-id',
 	  'roid' => 'CNIC-HA321983',
 	  'status' => [
 	    'linked',
@@ -512,7 +521,15 @@ to the C<int> and C<loc> internationalised and localised types.
 sub _contact_infData_to_hash {
 	my ($self, $infData) = @_;
 
-	my $hash = $self->_get_common_properties_from_infData($infData, 'email');
+	my $hash = $self->_get_common_properties_from_infData($infData, 'email', 'id');
+
+	# remove this as it gets in the way:
+	my $els = $infData->getElementsByLocalName('disclose');
+	if ($els->size > 0) {
+		while (my $el = $els->shift) {
+			$el->parentNode->removeChild($el);
+		}
+	}
 
 	foreach my $name ('voice', 'fax') {
 		my $els = $infData->getElementsByLocalName($name);
@@ -689,6 +706,113 @@ sub contact_transfer_approve {
 
 sub contact_transfer_reject {
 	return $_[0]->_transfer_request('reject', 'contact', $_[1]);
+}
+
+=pod
+
+=head1 CREATING OBJECTS
+
+The following methods can be used to create a new object at the server:
+
+	$epp->create_domain($domain);
+	$epp->create_host($host);
+	$epp->create_contact($contact);
+
+The argument for these methods is a hash ref of the same format as that
+returned by the info methods above. As a result, cloning an existing
+object is as simple as the following:
+
+	my $info = $epp->contact_info($contact);
+
+	# set a new contact ID to avoid clashing with the existing object
+	$info->{id} = $new_contact;
+
+	# randomize authInfo:
+	$info->{authInfo} = $random_string;
+
+	$epp->create_contact($info);
+
+C<Net::EPP::Simple> will ignore object properties that it does not recognise,
+and those properties (such as server-managed status codes) that clients are
+not permitted to set.
+
+=head2 CREATING NEW DOMAINS
+
+When creating a new domain object, you may also specify a C<period> key, like so:
+
+	my $domain = {
+	  'name' => 'example.tld',
+	  'period' => 2,
+	  'registrant' => 'contact-id',
+	  'contacts' => {
+	    'tech' => 'contact-id',
+	    'admin' => 'contact-id',
+	    'billing' => 'contact-id',
+	  },
+	  'status' => {
+	    'clientTransferProhibited',
+	  }
+	  'ns' => {
+	    'ns0.example.com',
+	    'ns1.example.com',
+	  },
+	};
+
+	$epp->create_domain($domain);
+
+C<Net::EPP::Simple> assumes the registry uses the host object model rather
+than the host attribute model.
+
+=cut
+
+sub create_domain {
+	my ($self, $domain) = @_;
+}
+
+sub create_host {
+	my ($self, $host) = @_;
+}
+
+sub create_contact {
+	my ($self, $contact) = @_;
+	my $frame = Net::EPP::Frame::Command::Create::Contact->new;
+
+	$frame->setContact($contact->{id});
+	$frame->setEmail($contact->{email});
+	$frame->setVoice($contact->{voice}) if ($contact->{voice} ne '');
+	$frame->setFax($contact->{fax}) if ($contact->{fax} ne '');
+	$frame->setAuthInfo($contact->{authInfo}) if ($contact->{authInfo} ne '');
+
+	if (ref($contact->{postalInfo}) eq 'HASH') {
+		foreach my $type (keys(%{$contact->{postalInfo}})) {
+			$frame->addPostalInfo(
+				$type,
+				$contact->{postalInfo}->{$type}->{name},
+				$contact->{postalInfo}->{$type}->{org},
+				$contact->{postalInfo}->{$type}->{addr}
+			);
+		}
+	}
+
+	if (ref($contact->{status}) eq 'ARRAY') {
+		foreach my $status (grep { /^client/ } @{$contact->{status}}) {
+			$frame->appendStatus($status);
+		}
+	}
+
+	my $response = $self->request($frame);
+
+	$Code = $self->_get_response_code($response);
+
+	if ($Code > 1999) {
+		$Error = $response->msg;
+		return undef;
+
+	} else {
+		return 1;
+
+	}
+
 }
 
 =pod
